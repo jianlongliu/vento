@@ -25,7 +25,7 @@ jobs:
           pacman -Syu --noconfirm
           pacman -S --noconfirm --needed \
             base-devel rust cargo clang pkgconf git pacman-contrib zstd \
-            wayland libxkbcommon freetype2 fontconfig vulkan-icd-loader
+            wayland libxkbcommon libxkbcommon-x11 freetype2 fontconfig vulkan-icd-loader
 
       - uses: actions/checkout@v4
 

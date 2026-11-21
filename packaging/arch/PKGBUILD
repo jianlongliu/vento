@@ -7,7 +7,7 @@ arch=('x86_64')
 url="https://github.com/jianlongliu/vento"
 license=('GPL-3.0-or-later')
 depends=('glibc' 'gcc-libs' 'zlib' 'libxkbcommon' 'wayland' 'vulkan-icd-loader' 'fontconfig' 'freetype2' 'hicolor-icon-theme' 'desktop-file-utils')
-makedepends=('rust' 'cargo' 'clang' 'pkgconf' 'git')
+makedepends=('rust' 'cargo' 'clang' 'pkgconf' 'git' 'libxkbcommon-x11')
 source=("git+$url#tag=ventox-v$pkgver"
         "vento-libs-$pkgver.tar.gz::https://github.com/pgaskin/vento/releases/download/v8/vento-x86_64-linux-gnu.tar.gz"
         "ironrdp-$pkgver.tar.gz::https://github.com/Devolutions/IronRDP/archive/e899a8261170063ef995e6d337ea873da2e449e2.tar.gz"
