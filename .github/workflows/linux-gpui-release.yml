@@ -1,0 +1,81 @@
+name: linux-gpui Release
+
+on:
+  push:
+    tags:
+      - 'ventox-v*'
+
+permissions:
+  contents: write
+
+jobs:
+  ci:
+    uses: ./.github/workflows/linux-gpui-ci.yml
+
+  package:
+    name: Arch package
+    needs: ci
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+      options: --user root
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm --needed \
+            base-devel rust cargo clang pkgconf git pacman-contrib zstd \
+            wayland libxkbcommon freetype2 fontconfig vulkan-icd-loader
+
+      - name: Check tag
+        run: |
+          set -euo pipefail
+          pkgver="$(sed -n 's/^pkgver=//p' packaging/arch/PKGBUILD)"
+          test "$GITHUB_REF_NAME" = "ventox-v$pkgver"
+
+      - name: Build package
+        run: |
+          set -euo pipefail
+          useradd -m builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          su builder -c "cd '$GITHUB_WORKSPACE/packaging/arch' && updpkgsums && makepkg --noconfirm"
+
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          cp packaging/arch/*.pkg.tar.zst artifacts/
+          cd artifacts
+          sha256sum *.pkg.tar.zst > SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arch-package
+          path: artifacts/*
+
+  release:
+    name: GitHub release
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: arch-package
+          path: artifacts
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          prerelease=""
+          if echo "$GITHUB_REF_NAME" | grep -qiE 'rc|beta|alpha|pre'; then
+            prerelease="--prerelease"
+          fi
+          gh release create "$GITHUB_REF_NAME" artifacts/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Ventox ${GITHUB_REF_NAME#ventox-v}" \
+            --generate-notes \
+            $prerelease

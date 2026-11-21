@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Ventox
+Comment=GPUI-based Wayland VNC, RDP and SPICE client
+Exec=ventox
+Icon=dev.ventox.Ventox
+Terminal=false
+Categories=Network;RemoteAccess;
+Keywords=VNC;RDP;SPICE;remote;desktop;
+StartupNotify=true
+StartupWMClass=dev.ventox.Ventox

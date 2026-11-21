@@ -1,0 +1,61 @@
+# Maintainer: Jianlong Liu
+pkgname=ventox
+pkgver=2026.11.21
+pkgrel=1
+pkgdesc="GPUI-based Wayland VNC, RDP and SPICE client"
+arch=('x86_64')
+url="https://github.com/jianlongliu/vento"
+license=('GPL-3.0-or-later')
+depends=('glibc' 'gcc-libs' 'zlib' 'libxkbcommon' 'wayland' 'vulkan-icd-loader' 'fontconfig' 'freetype2' 'hicolor-icon-theme' 'desktop-file-utils')
+makedepends=('rust' 'cargo' 'clang' 'pkgconf' 'git')
+source=("git+$url#tag=ventox-v$pkgver"
+        "vento-libs-$pkgver.tar.gz::https://github.com/pgaskin/vento/releases/download/v8/vento-x86_64-linux-gnu.tar.gz"
+        "ironrdp-$pkgver.tar.gz::https://github.com/Devolutions/IronRDP/archive/e899a8261170063ef995e6d337ea873da2e449e2.tar.gz"
+        "ryll-$pkgver.tar.gz::https://github.com/shakenfist/ryll/archive/f12d9b20752874d2bb1e950183cb1b3ff054bf94.tar.gz")
+sha256sums=('SKIP'
+            'dde3339f72ff18faedcf4e78322cdbfbeba4301866b6c65a73c322ea8a8bf008'
+            '634a4ea9adac0a5a4939068e421958c612ce063f2e3344a499b3c30184c76713'
+            '683cd4bb8a16048600e3fe8b92fe74a91f87df457b9c36dd0df5114210e92c26')
+
+_src="$srcdir/vento"
+_libs="$srcdir/vento-libs"
+
+prepare() {
+  cd "$_src"
+  rm -rf third_party/ironrdp third_party/ryll
+  mkdir -p third_party/ironrdp third_party/ryll
+  tar -xzf "$srcdir/ironrdp-$pkgver.tar.gz" -C third_party/ironrdp --strip-components=1
+  tar -xzf "$srcdir/ryll-$pkgver.tar.gz" -C third_party/ryll --strip-components=1
+  patch -Np1 -d third_party/ironrdp -i "$_src/patches/ironrdp/0001-feat-egfx-decode-AVC-per-surface-through-a-per-surfa.patch"
+  patch -Np1 -d third_party/ryll -i "$_src/patches/ryll/0001-protocol-the-crypto-provider-and-the-root-store-are-.patch"
+  patch -Np1 -d third_party/ryll -i "$_src/patches/ryll/0002-compression-openh264-behind-a-feature.patch"
+
+  mkdir -p "$_libs"
+  tar -xzf "$srcdir/vento-libs-$pkgver.tar.gz" -C "$_libs"
+}
+
+build() {
+  cd "$_src/linux-gpui"
+  cargo build --release --locked
+
+  mkdir -p target/release/lib
+  install -m755 "$_libs/vento/lib/libvento_libvnc.so" target/release/lib/
+  install -m755 "$_libs/vento/lib/libvento_tigervnc.so" target/release/lib/
+  install -m755 "$_libs/vento/lib/libvento_freerdp.so" target/release/lib/
+}
+
+package() {
+  install -Dm755 "$_src/linux-gpui/target/release/ventox" "$pkgdir/usr/lib/ventox/vento"
+  install -Dm755 "$_src/linux-gpui/target/release/lib/libvento_libvnc.so" "$pkgdir/usr/lib/ventox/lib/libvento_libvnc.so"
+  install -Dm755 "$_src/linux-gpui/target/release/lib/libvento_tigervnc.so" "$pkgdir/usr/lib/ventox/lib/libvento_tigervnc.so"
+  install -Dm755 "$_src/linux-gpui/target/release/lib/libvento_freerdp.so" "$pkgdir/usr/lib/ventox/lib/libvento_freerdp.so"
+
+  mkdir -p "$pkgdir/usr/bin"
+  ln -s ../lib/ventox/vento "$pkgdir/usr/bin/ventox"
+
+  install -Dm644 "$_src/packaging/arch/dev.ventox.Ventox.desktop" "$pkgdir/usr/share/applications/dev.ventox.Ventox.desktop"
+  install -Dm644 "$_src/linux/metadata/icon.png" "$pkgdir/usr/share/icons/hicolor/512x512/apps/dev.ventox.Ventox.png"
+  install -Dm644 "$_src/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 "$_src/linux-gpui/THIRD_PARTY_LICENSES.md" "$pkgdir/usr/share/licenses/$pkgname/THIRD_PARTY_LICENSES.md"
+  install -Dm644 "$_src/linux-gpui/README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

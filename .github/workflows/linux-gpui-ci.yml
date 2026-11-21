@@ -1,0 +1,49 @@
+name: linux-gpui CI
+
+on:
+  push:
+    paths:
+      - 'linux-gpui/**'
+      - 'packaging/**'
+      - 'patches/**'
+      - '.github/workflows/linux-gpui-ci.yml'
+  pull_request:
+    paths:
+      - 'linux-gpui/**'
+      - 'packaging/**'
+      - 'patches/**'
+      - '.github/workflows/linux-gpui-ci.yml'
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test and build
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+      options: --user root
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm --needed \
+            base-devel rust cargo clang pkgconf git \
+            wayland libxkbcommon freetype2 fontconfig vulkan-icd-loader
+
+      - name: Submodules and patches
+        run: |
+          git submodule update --init --depth 1 third_party/ironrdp third_party/ryll
+          ./patch.sh -n ironrdp ryll
+
+      - name: Test
+        working-directory: linux-gpui
+        run: cargo test --locked
+
+      - name: Build
+        working-directory: linux-gpui
+        run: cargo build --locked
