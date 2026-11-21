@@ -37,7 +37,10 @@ jobs:
 
       - name: Submodules and patches
         run: |
+          git config --global --add safe.directory "$PWD"
           git submodule update --init --depth 1 third_party/ironrdp third_party/ryll
+          git config --global --add safe.directory "$PWD/third_party/ironrdp"
+          git config --global --add safe.directory "$PWD/third_party/ryll"
           ./patch.sh -n ironrdp ryll
 
       - name: Test
