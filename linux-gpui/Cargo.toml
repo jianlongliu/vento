@@ -1,0 +1,45 @@
+[workspace]
+
+[package]
+name = "ventox"
+version = "2026.11.21"
+edition = "2024"
+license = "GPL-3.0-or-later"
+publish = false
+
+[[bin]]
+name = "ventox"
+path = "src/main.rs"
+
+# gpui 0.2.2's build script wants bindgen 0.71 (prettyplease 0.2) while the
+# C backend crates want bindgen 0.73, which needs prettyplease 0.3 for its
+# syn 3. A direct 0.3 requirement makes Cargo resolve both versions instead
+# of downgrading the newer bindgen to a prettyplease it cannot compile with.
+[dependencies]
+gpui = { version = "0.2.2", default-features = false, features = ["wayland"] }
+log = "0.4"
+env_logger = "0.11"
+unicode-segmentation = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+smol = "2"
+image = "0.25"
+ring = "0.17"
+base64 = "0.22"
+remotedesktop-api = { path = "../backends/api" }
+remotedesktop-runtime = { path = "../backends/runtime" }
+remotedesktop-rfb = { path = "../backends/modules/rfb" }
+remotedesktop-libvnc = { path = "../backends/modules/libvnc" }
+remotedesktop-tigervnc = { path = "../backends/modules/tigervnc" }
+remotedesktop-freerdp = { path = "../backends/modules/freerdp" }
+remotedesktop-ironrdp = { path = "../backends/modules/ironrdp" }
+remotedesktop-spice = { path = "../backends/modules/spice" }
+
+# gpui 0.2.2's build script wants bindgen 0.71 (which pins prettyplease
+# 0.2), while the C backend crates want bindgen 0.73. Cargo reused
+# prettyplease 0.2 for both, but bindgen 0.73 uses syn 3, which
+# prettyplease 0.2 cannot read. The vendored copy only changes its
+# prettyplease requirement to 0.3; bindgen 0.71 keeps the registry one.
+[patch.crates-io]
+bindgen = { path = "vendor/bindgen" }
+
