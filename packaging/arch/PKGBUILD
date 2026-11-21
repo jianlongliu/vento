@@ -1,11 +1,13 @@
 # Maintainer: Jianlong Liu
 pkgname=ventox
-pkgver=2026.11.21.3
+pkgver=2026.11.21.4
 pkgrel=1
 pkgdesc="GPUI-based Wayland VNC, RDP and SPICE client"
 arch=('x86_64')
 url="https://github.com/jianlongliu/vento"
 license=('GPL-3.0-or-later')
+# ring's perlasm core does not link when makepkg's global LTO is enabled.
+options=('!lto')
 depends=('glibc' 'gcc-libs' 'zlib' 'libxkbcommon' 'wayland' 'vulkan-icd-loader' 'fontconfig' 'freetype2' 'hicolor-icon-theme' 'desktop-file-utils')
 makedepends=('rust' 'cargo' 'clang' 'pkgconf' 'git' 'libxkbcommon-x11')
 source=("git+$url#tag=ventox-v$pkgver"
