@@ -1223,6 +1223,24 @@ impl VentoxApp {
                                     .text_color(theme::text_tertiary())
                                     .child("ABOUT"),
                             )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(2.))
+                                    .child(
+                                        div()
+                                            .text_size(px(11.5))
+                                            .text_color(theme::text())
+                                            .child("Free software — source: github.com/jianlongliu/vento"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(10.5))
+                                            .text_color(theme::text_tertiary())
+                                            .child("If you paid for it, you were overcharged."),
+                                    ),
+                            )
                             .children(about::rows().into_iter().map(|(label, value)| {
                                 div()
                                     .flex()

@@ -9,6 +9,8 @@ use crate::model::Protocol;
 pub fn rows() -> Vec<(&'static str, String)> {
     vec![
         ("Ventox", env!("CARGO_PKG_VERSION").to_string()),
+        ("Source", "github.com/jianlongliu/vento".to_string()),
+        ("License", "GPL-3.0-or-later".to_string()),
         (
             "Vento backend sources",
             env!("VENTO_BACKEND_VERSION").to_string(),
