@@ -1765,7 +1765,7 @@ fn settings_toggle_row(
                         .size(px(16.))
                         .rounded_full()
                         .bg(theme::text())
-                        .when(!on, |s| s.ml(px(14.))),
+                        .when(on, |s| s.ml(px(14.))),
                 ),
         )
         .on_click(cx.listener(move |this, _, _, cx| {
@@ -2277,7 +2277,7 @@ fn toggle_row(
                         .size(px(16.))
                         .rounded_full()
                         .bg(theme::text())
-                        .when(!on, |s| s.ml(px(14.))),
+                        .when(on, |s| s.ml(px(14.))),
                 ),
         )
         .on_click(cx.listener(move |this, _, _, cx| {
