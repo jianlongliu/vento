@@ -12,8 +12,8 @@
 use crate::about;
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, Context, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, SharedString,
-    Window, div, px, rgba,
+    AnyElement, Context, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ScrollHandle,
+    SharedString, Window, div, px, relative, rgba,
 };
 
 use crate::model::{Connection, Protocol};
@@ -64,6 +64,8 @@ struct EditorState {
     receive_clipboard: bool,
     grab_keyboard: bool,
     save_password: bool,
+    delete_armed: bool,
+    scroll: ScrollHandle,
 }
 
 impl VentoxApp {
@@ -172,13 +174,19 @@ impl VentoxApp {
             name: cx.new(move |cx| TextInput::new("Optional label", name, cx)),
             host: cx.new(move |cx| TextInput::new("hostname or IP", host, cx)),
             port: cx.new(move |cx| TextInput::new("5900", port, cx)),
-            username: cx.new(move |cx| TextInput::new("Username", username, cx)),
+            username: {
+                let username_input = cx.new(move |cx| TextInput::new("Username", username, cx));
+                cx.observe(&username_input, |_, _, cx| cx.notify()).detach();
+                username_input
+            },
             password: cx
                 .new(move |cx| TextInput::new("Password", cached_password, cx).masked(true)),
             send_clipboard,
             receive_clipboard,
             grab_keyboard,
             save_password,
+            delete_armed: false,
+            scroll: ScrollHandle::new(),
         }
     }
 
@@ -217,6 +225,18 @@ impl VentoxApp {
             (None, _) => 0,
         };
         window.focus(&handles[next]);
+        if let Some(editor) = &self.editor {
+            // The body children are PROTOCOL, NAME/USERNAME, ADDRESS/PORT,
+            // PASSWORD and OPTIONS. Scroll the matching group into view so a
+            // focused field cannot hide behind the fixed footer on a short
+            // window.
+            let item = match next {
+                0 | 1 => 1,
+                2 | 3 => 2,
+                _ => 3,
+            };
+            editor.scroll.scroll_to_item(item);
+        }
         cx.notify();
     }
 
@@ -242,6 +262,7 @@ impl VentoxApp {
             true,
         );
         window.focus(&editor.name.read(cx).handle());
+        self.notice = None;
         self.editor = Some(editor);
         cx.notify();
     }
@@ -263,11 +284,13 @@ impl VentoxApp {
             c.save_password,
         );
         window.focus(&editor.name.read(cx).handle());
+        self.notice = None;
         self.editor = Some(editor);
         cx.notify();
     }
 
     fn close_editor(&mut self, cx: &mut Context<Self>) {
+        self.notice = None;
         self.editor = None;
         cx.notify();
     }
@@ -276,8 +299,20 @@ impl VentoxApp {
     fn commit_editor(&mut self, cx: &mut Context<Self>) -> Option<Connection> {
         let editor = self.editor.clone()?;
         let name = editor.name.read(cx).content();
-        let host = editor.host.read(cx).content();
-        let port: u16 = editor.port.read(cx).content().parse().unwrap_or(5900);
+        let host = editor.host.read(cx).content().trim().to_string();
+        if host.is_empty() {
+            self.notice = Some("Address is required.".into());
+            cx.notify();
+            return None;
+        }
+        let port: u16 = match editor.port.read(cx).content().trim().parse() {
+            Ok(port) if port > 0 => port,
+            _ => {
+                self.notice = Some("Port must be between 1 and 65535.".into());
+                cx.notify();
+                return None;
+            }
+        };
         let username = editor.username.read(cx).content();
         let name = if name.trim().is_empty() {
             host.clone()
@@ -489,6 +524,7 @@ impl VentoxApp {
             self.connections.remove(index);
             self.selected = None;
         }
+        self.notice = None;
         self.editor = None;
         if self.persist
             && let Err(e) = store::save(&self.connections)
@@ -968,10 +1004,22 @@ impl VentoxApp {
                     .border_color(theme::border_strong())
                     .shadow_lg()
                     .on_click(|_, _, _| {})
-                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                         match event.keystroke.key.as_str() {
                             "enter" | "return" => this.submit_quick_connect(cx),
                             "escape" => this.close_quick_connect(cx),
+                            "tab" => {
+                                if let Some(quick) = &this.quick_connect {
+                                    let address = quick.address.read(cx).handle();
+                                    let password = quick.password.read(cx).handle();
+                                    let next = if address.is_focused(window) {
+                                        password
+                                    } else {
+                                        address
+                                    };
+                                    window.focus(&next);
+                                }
+                            }
                             _ => {}
                         }
                     }))
@@ -1047,7 +1095,7 @@ impl VentoxApp {
                                     .flex_col()
                                     .gap(px(4.))
                                     .child(field("PASSWORD", quick.password.clone()))
-                                    .child(password_hint()),
+                                    .child(password_hint(PASSWORD_HINT_OPTIONAL)),
                             ),
                     )
                     .child(
@@ -1086,6 +1134,8 @@ impl VentoxApp {
     }
 
     fn settings_overlay(&self, dark: bool, cx: &mut Context<Self>) -> AnyElement {
+        let about_rows = about::rows();
+        let about_split = about_rows.len().div_ceil(2);
         div()
             .id("settings-scrim")
             .absolute()
@@ -1108,7 +1158,7 @@ impl VentoxApp {
                     .flex()
                     .flex_col()
                     .w(px(640.))
-                    .max_h(px(720.))
+                    .max_h(relative(0.9))
                     .rounded_xl()
                     .overflow_hidden()
                     .bg(theme::surface_raised())
@@ -1149,6 +1199,8 @@ impl VentoxApp {
                             .id("settings-rows")
                             .flex()
                             .flex_col()
+                            .flex_1()
+                            .min_h(px(0.))
                             .gap(px(12.))
                             .px(px(24.))
                             .pb(px(18.))
@@ -1185,13 +1237,13 @@ impl VentoxApp {
                                     .child("NEW CONNECTIONS"),
                             )
                             .child(settings_toggle_row(
-                                "Send clipboard",
+                                "Send clipboard text",
                                 self.settings.send_clipboard,
                                 0,
                                 cx,
                             ))
                             .child(settings_toggle_row(
-                                "Receive clipboard",
+                                "Receive clipboard text",
                                 self.settings.receive_clipboard,
                                 1,
                                 cx,
@@ -1233,28 +1285,45 @@ impl VentoxApp {
                                             .child("If you paid for it, you were overcharged."),
                                     ),
                             )
-                            .children(about::rows().into_iter().map(|(label, value)| {
+                            .child(
                                 div()
                                     .flex()
-                                    .items_start()
-                                    .justify_between()
-                                    .gap(px(16.))
-                                    .child(
+                                    .gap(px(20.))
+                                    .children([0, 1].into_iter().map(|column| {
+                                        let rows = if column == 0 {
+                                            &about_rows[..about_split]
+                                        } else {
+                                            &about_rows[about_split..]
+                                        };
                                         div()
-                                            .flex_shrink_0()
-                                            .w(px(150.))
-                                            .text_size(px(11.))
-                                            .text_color(theme::text_tertiary())
-                                            .child(label),
-                                    )
-                                    .child(
-                                        div()
+                                            .flex()
+                                            .flex_col()
                                             .flex_1()
-                                            .text_size(px(11.5))
-                                            .text_color(theme::text_secondary())
-                                            .child(value),
-                                    )
-                            })),
+                                            .gap(px(2.))
+                                            .children(rows.iter().map(|(label, value)| {
+                                                div()
+                                                    .flex()
+                                                    .items_start()
+                                                    .justify_between()
+                                                    .gap(px(12.))
+                                                    .child(
+                                                        div()
+                                                            .flex_shrink_0()
+                                                            .w(px(105.))
+                                                            .text_size(px(11.))
+                                                            .text_color(theme::text_tertiary())
+                                                            .child(*label),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .flex_1()
+                                                            .text_size(px(11.5))
+                                                            .text_color(theme::text_secondary())
+                                                            .child(value.clone()),
+                                                    )
+                                            }))
+                                    })),
+                            )
                     )
                     .child(
                         div()
@@ -1290,6 +1359,15 @@ impl VentoxApp {
 
     fn editor_overlay(&self, editor: EditorState, cx: &mut Context<Self>) -> AnyElement {
         let is_new = editor.existing.is_none();
+        let password_hint_text = if matches!(
+            editor.protocol,
+            Protocol::VncRust | Protocol::VncLibVnc | Protocol::VncTigerVnc
+        ) && editor.username.read(cx).content().trim().is_empty()
+        {
+            PASSWORD_HINT_VNC
+        } else {
+            PASSWORD_HINT_OPTIONAL
+        };
         div()
             .id("editor-scrim")
             .absolute()
@@ -1306,7 +1384,7 @@ impl VentoxApp {
                     .flex()
                     .flex_col()
                     .w(px(600.))
-                    .max_h(px(760.))
+                    .max_h(relative(0.9))
                     .rounded_xl()
                     .overflow_hidden()
                     .bg(theme::surface_raised())
@@ -1381,10 +1459,13 @@ impl VentoxApp {
                             .id("editor-body")
                             .flex()
                             .flex_col()
+                            .flex_1()
+                            .min_h(px(0.))
                             .gap(px(14.))
                             .px(px(24.))
                             .pb(px(20.))
                             .overflow_y_scroll()
+                            .track_scroll(&editor.scroll)
                             .child(field("PROTOCOL", protocol_picker(editor.protocol, cx)))
                             .child(
                                 div()
@@ -1406,7 +1487,7 @@ impl VentoxApp {
                                     .flex_col()
                                     .gap(px(4.))
                                     .child(field("PASSWORD", editor.password.clone()))
-                                    .child(password_hint()),
+                                    .child(password_hint(password_hint_text)),
                             )
                             .child(
                                 div()
@@ -1415,13 +1496,13 @@ impl VentoxApp {
                                     .gap(px(10.))
                                     .child(section_label("OPTIONS"))
                                     .child(toggle_row(
-                                        "Send clipboard",
+                                        "Send clipboard text",
                                         editor.send_clipboard,
                                         0,
                                         cx,
                                     ))
                                     .child(toggle_row(
-                                        "Receive clipboard",
+                                        "Receive clipboard text",
                                         editor.receive_clipboard,
                                         1,
                                         cx,
@@ -1458,10 +1539,22 @@ impl VentoxApp {
                                         .hover(|s| s.bg(rgba(0xff453a1a)))
                                         .text_size(px(12.5))
                                         .text_color(theme::red())
-                                        .on_click(
-                                            cx.listener(|this, _, _, cx| this.delete_editor(cx)),
-                                        )
-                                        .child("Delete"),
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            let Some(editor) = &mut this.editor else {
+                                                return;
+                                            };
+                                            if editor.delete_armed {
+                                                this.delete_editor(cx);
+                                            } else {
+                                                editor.delete_armed = true;
+                                                cx.notify();
+                                            }
+                                        }))
+                                        .child(if editor.delete_armed {
+                                            "Confirm delete"
+                                        } else {
+                                            "Delete"
+                                        }),
                                 )
                             }))
                             .child(
@@ -1764,7 +1857,11 @@ fn settings_toggle_row(
                     div()
                         .size(px(16.))
                         .rounded_full()
-                        .bg(theme::text())
+                        .bg(if on {
+                            theme::accent_text()
+                        } else {
+                            theme::text_secondary()
+                        })
                         .when(on, |s| s.ml(px(14.))),
                 ),
         )
@@ -1784,11 +1881,15 @@ fn settings_toggle_row(
         .into_any_element()
 }
 
-fn password_hint() -> AnyElement {
+const PASSWORD_HINT_OPTIONAL: &str =
+    "Optional. You can also leave this empty and enter it when prompted.";
+const PASSWORD_HINT_VNC: &str = "For VNC, leave Username empty and enter the VNC password here.";
+
+fn password_hint(text: &'static str) -> AnyElement {
     div()
         .text_size(px(10.5))
         .text_color(theme::text_tertiary())
-        .child("For VNC, leave Username empty and enter the VNC password here.")
+        .child(text)
         .into_any_element()
 }
 
@@ -2208,10 +2309,16 @@ fn protocol_option(
         .hover(|s| s.bg(theme::surface_hover()))
         .on_click(cx.listener(move |this, _, _, cx| {
             if let Some(editor) = &mut this.editor {
-                editor.protocol = protocol;
-                editor.port.update(cx, |input, cx| {
-                    input.set_content(protocol.default_port().to_string(), cx)
-                });
+                if editor.protocol != protocol {
+                    let current_port = editor.port.read(cx).content();
+                    let old_default = editor.protocol.default_port().to_string();
+                    editor.protocol = protocol;
+                    if current_port == old_default {
+                        editor.port.update(cx, |input, cx| {
+                            input.set_content(protocol.default_port().to_string(), cx)
+                        });
+                    }
+                }
             }
             cx.notify();
         }))
@@ -2276,7 +2383,11 @@ fn toggle_row(
                     div()
                         .size(px(16.))
                         .rounded_full()
-                        .bg(theme::text())
+                        .bg(if on {
+                            theme::accent_text()
+                        } else {
+                            theme::text_secondary()
+                        })
                         .when(on, |s| s.ml(px(14.))),
                 ),
         )

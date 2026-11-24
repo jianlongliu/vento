@@ -120,11 +120,11 @@ impl Palette {
             surface_active: rgb(0xacb0be),
             overlay_scrim: rgba(0x00000066),
             border: rgb(0xbcc0cc),
-            border_soft: rgb(0xccd0da),
+            border_soft: rgb(0xbcc0cc),
             border_strong: rgb(0xacb0be),
             text: rgb(0x4c4f69),
             text_secondary: rgb(0x5c5f77),
-            text_tertiary: rgb(0x8c8fa1),
+            text_tertiary: rgb(0x6c6f85),
             accent: rgb(0x1e66f5),
             accent_hover: rgb(0x1656d6),
             accent_soft: rgba(0x1e66f529),
@@ -417,6 +417,13 @@ fn readable_on(color: Rgba) -> Rgba {
         rgb(0xffffff)
     }
 }
+
+// Session chrome sits on a fixed near-black canvas regardless of the app
+// theme, so it needs its own light text tokens.
+pub const SESSION_TEXT: Rgba = rgb(0xcdd6f4);
+pub const SESSION_TEXT_SECONDARY: Rgba = rgb(0xa6adc8);
+pub const SESSION_TEXT_TERTIARY: Rgba = rgb(0x9399b2);
+pub const SESSION_ACCENT: Rgba = rgb(0x89b4fa);
 
 // Type scale.
 pub const TEXT_LARGE_TITLE: Pixels = px(26.);
