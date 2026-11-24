@@ -461,14 +461,6 @@ impl VentoxApp {
         cx.notify();
     }
 
-    fn save_editor(&mut self, cx: &mut Context<Self>) {
-        if self.commit_editor(cx).is_some() {
-            self.editor = None;
-            self.notice = None;
-        }
-        cx.notify();
-    }
-
     fn connect_editor(&mut self, cx: &mut Context<Self>) {
         let password = self
             .editor
@@ -1480,23 +1472,6 @@ impl VentoxApp {
                                     .child(ghost_button("Cancel", cx))
                                     .child(
                                         div()
-                                            .id("save-connection")
-                                            .flex()
-                                            .items_center()
-                                            .h(px(32.))
-                                            .px(px(12.))
-                                            .rounded_lg()
-                                            .cursor_pointer()
-                                            .hover(|s| s.bg(theme::surface_hover()))
-                                            .text_size(px(12.5))
-                                            .text_color(theme::text_secondary())
-                                            .on_click(
-                                                cx.listener(|this, _, _, cx| this.save_editor(cx)),
-                                            )
-                                            .child("Save"),
-                                    )
-                                    .child(
-                                        div()
                                             .id("connect-connection")
                                             .flex()
                                             .items_center()
@@ -1514,7 +1489,7 @@ impl VentoxApp {
                                                     this.connect_editor(cx)
                                                 }),
                                             )
-                                            .child("Connect"),
+                                            .child("Save and Connect"),
                                     ),
                             ),
                     ),
