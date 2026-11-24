@@ -1,6 +1,6 @@
 # Maintainer: Jianlong Liu
 pkgname=ventox
-pkgver=2026.11.24rc1
+pkgver=2026.11.24rc2
 pkgrel=1
 pkgdesc="GPUI-based Wayland VNC, RDP and SPICE client"
 arch=('x86_64')
