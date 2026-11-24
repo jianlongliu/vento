@@ -36,6 +36,7 @@ struct BackendSession {
     backend: Arc<dyn Backend>,
     mailbox: Arc<Mailbox>,
     wake_rx: smol::channel::Receiver<()>,
+    password: Option<String>,
 }
 
 fn start_backend(
@@ -93,9 +94,8 @@ fn start_backend(
     } else {
         Some(password)
     };
-    if let Some(password) = &password {
+    if password.is_some() {
         log::debug!("password for {address}: reused");
-        cx.global::<Passwords>().set(&address, password);
     } else {
         log::debug!("password for {address}: will prompt");
     }
@@ -121,6 +121,7 @@ fn start_backend(
         backend,
         mailbox,
         wake_rx,
+        password,
     })
 }
 
@@ -223,6 +224,7 @@ pub struct SessionWindow {
     grab_keyboard: bool,
     save_password: bool,
     persist: bool,
+    pending_password: Option<String>,
     ever_connected: bool,
     reconnect_pending: bool,
     auto_reconnect_attempted: bool,
@@ -270,6 +272,7 @@ impl SessionWindow {
             backend,
             mailbox,
             wake_rx,
+            password: pending_password,
         } = initial;
         let send_clipboard = connection.send_clipboard;
         let receive_clipboard = connection.receive_clipboard;
@@ -301,6 +304,7 @@ impl SessionWindow {
             grab_keyboard,
             save_password,
             persist,
+            pending_password,
             ever_connected: false,
             reconnect_pending: false,
             auto_reconnect_attempted: false,
@@ -324,11 +328,22 @@ impl SessionWindow {
                     self.ever_connected = true;
                     self.reconnect_pending = false;
                     self.auto_reconnect_attempted = false;
+                    if let Some(password) = self.pending_password.take() {
+                        cx.global::<Passwords>()
+                            .set(&self.connection.address(), &password);
+                    }
                 }
                 Event::Frame { .. } => frame = true,
                 Event::Status(status) => self.status = status,
                 Event::Closed { detail } => {
                     let was_connected = self.ever_connected;
+                    let auth_failed = detail
+                        .to_ascii_lowercase()
+                        .contains("authentication failed");
+                    if auth_failed {
+                        self.pending_password = None;
+                        cx.global::<Passwords>().forget(&self.connection.address());
+                    }
                     self.state = State::Closed { detail };
                     self.status = None;
                     self.prompt = None;
@@ -337,6 +352,11 @@ impl SessionWindow {
                     }
                 }
                 Event::CredentialsNeeded { .. } => {
+                    // A password from the editor or Quick Connect is only a
+                    // guess until the server accepts it. Drop it, so a retry
+                    // prompts instead of silently reusing the bad value.
+                    self.pending_password = None;
+                    cx.global::<Passwords>().forget(&self.connection.address());
                     self.prompt = Some(Prompt::Credentials);
                     self.focus_password = true;
                 }
@@ -474,6 +494,7 @@ impl SessionWindow {
                 self.generation = self.generation.wrapping_add(1);
                 self.backend = next.backend;
                 self._mailbox = next.mailbox;
+                self.pending_password = next.password;
                 self.event_task = spawn_events(cx, &self._mailbox, next.wake_rx, self.generation);
                 self.state = State::Connecting;
                 self.status = Some("Reconnecting…".into());
