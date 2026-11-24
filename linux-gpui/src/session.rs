@@ -462,7 +462,7 @@ impl SessionWindow {
             // Intel driver. Keep a short history so the atlas is retired after
             // the GPU has moved on.
             self.old_images.push_back(old);
-            while self.old_images.len() > 8 {
+            while self.old_images.len() > IMAGE_HISTORY {
                 if let Some(old) = self.old_images.pop_front() {
                     cx.drop_image(old, None);
                 }
@@ -1454,6 +1454,12 @@ fn layout_for(
 }
 
 /// RFB's wheel button bits, which every backend takes.
+/// How many frame atlases to keep alive before retiring one. Destroying an
+/// atlas that the GPU may still be reading hangs Intel i915; a slow VNC feed
+/// survived eight frames, but a high-rate feed needs a wider window. Thirty-two
+/// 1024x1024 atlases cap the extra GPU memory at roughly 128 MiB.
+const IMAGE_HISTORY: usize = 32;
+
 const WHEEL_UP: i32 = 8;
 const WHEEL_DOWN: i32 = 16;
 const WHEEL_LEFT: i32 = 32;
