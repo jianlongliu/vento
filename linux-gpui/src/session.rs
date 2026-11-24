@@ -8,7 +8,7 @@
 //! chrome around the picture stays out of its way: a floating toolbar, an
 //! optional information panel, and sheets for credentials and trust.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -190,6 +190,7 @@ pub struct SessionWindow {
     status: Option<String>,
     facts: Facts,
     image: Option<Arc<RenderImage>>,
+    old_images: VecDeque<Arc<RenderImage>>,
     buffer: Vec<u8>,
     prompt: Option<Prompt>,
     focus_password: bool,
@@ -245,6 +246,7 @@ impl SessionWindow {
             status: None,
             facts: Facts::NONE,
             image: None,
+            old_images: VecDeque::new(),
             buffer: Vec::new(),
             prompt: None,
             focus_password: false,
@@ -368,9 +370,17 @@ impl SessionWindow {
             return;
         };
         let new_image = Arc::new(RenderImage::new([image::Frame::new(buffer)]));
-        let old = self.image.replace(new_image);
-        if let Some(old) = old {
-            cx.drop_image(old, None);
+        if let Some(old) = self.image.replace(new_image) {
+            // Do not free the atlas texture immediately: blade may still have
+            // the previous frame in flight, and destroying it can hang the
+            // Intel driver. Keep a short history so the atlas is retired after
+            // the GPU has moved on.
+            self.old_images.push_back(old);
+            while self.old_images.len() > 8 {
+                if let Some(old) = self.old_images.pop_front() {
+                    cx.drop_image(old, None);
+                }
+            }
         }
         self.last_frame = Some(Instant::now());
     }
