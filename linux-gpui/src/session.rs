@@ -10,13 +10,13 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, ClipboardItem, Context, FocusHandle, IntoElement, KeyDownEvent, KeyUpEvent,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, RenderImage, ScrollDelta,
-    ScrollWheelEvent, Window, div, img, px, rgb, rgba,
+    ScrollWheelEvent, Task, Window, div, img, px, rgb, rgba,
 };
 
 use api::Credentials;
@@ -32,12 +32,18 @@ use crate::store;
 use crate::text_input::TextInput;
 use crate::theme;
 
-pub fn open(
-    connection: Connection,
+struct BackendSession {
+    backend: Arc<dyn Backend>,
+    mailbox: Arc<Mailbox>,
+    wake_rx: smol::channel::Receiver<()>,
+}
+
+fn start_backend(
+    connection: &Connection,
     password: String,
     persist: bool,
-    cx: &mut App,
-) -> Result<(), String> {
+    cx: &App,
+) -> Result<BackendSession, String> {
     let (wake_tx, wake_rx) = smol::channel::unbounded::<()>();
     let mailbox = Mailbox::new(Some(Box::new(move || {
         let _ = wake_tx.try_send(());
@@ -111,6 +117,21 @@ pub fn open(
     };
     let backend = kind.start(&connect)?;
 
+    Ok(BackendSession {
+        backend,
+        mailbox,
+        wake_rx,
+    })
+}
+
+pub fn open(
+    connection: Connection,
+    password: String,
+    persist: bool,
+    cx: &mut App,
+) -> Result<(), String> {
+    let initial = start_backend(&connection, password, persist, cx)?;
+
     let bounds = gpui::Bounds::centered(None, gpui::size(px(1280.), px(820.)), cx);
     cx.open_window(
         gpui::WindowOptions {
@@ -125,8 +146,7 @@ pub fn open(
             ..Default::default()
         },
         move |window, cx| {
-            let session =
-                cx.new(|cx| SessionWindow::new(cx, connection, backend, mailbox, persist, wake_rx));
+            let session = cx.new(|cx| SessionWindow::new(cx, connection, initial, persist, 1));
             let handle = session.read(cx).focus_handle.clone();
             window.focus(&handle);
             session
@@ -202,21 +222,55 @@ pub struct SessionWindow {
     receive_clipboard: bool,
     grab_keyboard: bool,
     save_password: bool,
+    persist: bool,
+    ever_connected: bool,
+    reconnect_pending: bool,
+    auto_reconnect_attempted: bool,
+    generation: u64,
+    event_task: Task<()>,
     focus_handle: FocusHandle,
     buttons: i32,
     pointer: (i32, i32),
     synthetic_modifiers: HashMap<i64, Vec<(i64, u32)>>,
 }
 
+fn spawn_events(
+    cx: &mut Context<SessionWindow>,
+    mailbox: &Arc<Mailbox>,
+    wake_rx: smol::channel::Receiver<()>,
+    generation: u64,
+) -> Task<()> {
+    let task_mailbox = Arc::clone(mailbox);
+    cx.spawn(async move |this, cx| {
+        while wake_rx.recv().await.is_ok() {
+            let events = task_mailbox.take_all();
+            if this
+                .update(cx, |this, cx| {
+                    if this.generation == generation {
+                        this.handle_events(events, cx);
+                    }
+                })
+                .is_err()
+            {
+                break;
+            }
+        }
+    })
+}
+
 impl SessionWindow {
     fn new(
         cx: &mut Context<Self>,
         connection: Connection,
-        backend: Arc<dyn Backend>,
-        mailbox: Arc<Mailbox>,
+        initial: BackendSession,
         persist: bool,
-        wake_rx: smol::channel::Receiver<()>,
+        generation: u64,
     ) -> Self {
+        let BackendSession {
+            backend,
+            mailbox,
+            wake_rx,
+        } = initial;
         let send_clipboard = connection.send_clipboard;
         let receive_clipboard = connection.receive_clipboard;
         let grab_keyboard = connection.grab_keyboard;
@@ -224,19 +278,7 @@ impl SessionWindow {
         let password = cx.new(|cx| TextInput::new("Password", "", cx).masked(true));
         let focus_handle = cx.focus_handle();
 
-        let task_mailbox = Arc::clone(&mailbox);
-        cx.spawn(async move |this, cx| {
-            while wake_rx.recv().await.is_ok() {
-                let events = task_mailbox.take_all();
-                if this
-                    .update(cx, |this, cx| this.handle_events(events, cx))
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
+        let event_task = spawn_events(cx, &mailbox, wake_rx, generation);
 
         Self {
             connection,
@@ -258,6 +300,12 @@ impl SessionWindow {
             receive_clipboard,
             grab_keyboard,
             save_password,
+            persist,
+            ever_connected: false,
+            reconnect_pending: false,
+            auto_reconnect_attempted: false,
+            generation,
+            event_task,
             focus_handle,
             buttons: 0,
             pointer: (0, 0),
@@ -273,13 +321,20 @@ impl SessionWindow {
                     self.facts = self.backend.facts();
                     self.state = State::Connected;
                     self.status = None;
+                    self.ever_connected = true;
+                    self.reconnect_pending = false;
+                    self.auto_reconnect_attempted = false;
                 }
                 Event::Frame { .. } => frame = true,
                 Event::Status(status) => self.status = status,
                 Event::Closed { detail } => {
+                    let was_connected = self.ever_connected;
                     self.state = State::Closed { detail };
                     self.status = None;
                     self.prompt = None;
+                    if was_connected {
+                        self.schedule_reconnect(cx);
+                    }
                 }
                 Event::CredentialsNeeded { .. } => {
                     self.prompt = Some(Prompt::Credentials);
@@ -383,6 +438,62 @@ impl SessionWindow {
             }
         }
         self.last_frame = Some(Instant::now());
+    }
+
+    /// A dropped session gets one automatic retry. A failed attempt leaves the
+    /// card with an explicit Reconnect button instead of retrying forever.
+    fn schedule_reconnect(&mut self, cx: &mut Context<Self>) {
+        if self.reconnect_pending || self.auto_reconnect_attempted {
+            return;
+        }
+        self.reconnect_pending = true;
+        self.auto_reconnect_attempted = true;
+        self.state = State::Connecting;
+        self.status = Some("Connection lost. Reconnecting…".into());
+        cx.spawn(async move |this, cx| {
+            smol::Timer::after(Duration::from_secs(1)).await;
+            let _ = this.update(cx, |this, cx| {
+                this.reconnect_pending = false;
+                this.reconnect(cx);
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn reconnect(&mut self, cx: &mut Context<Self>) {
+        let connection = self.connection.clone();
+        let persist = self.persist;
+        // One automatic attempt per drop. A failed attempt must land on the
+        // Reconnect/Close card instead of scheduling itself again from the
+        // new backend's Closed event.
+        self.ever_connected = false;
+        match start_backend(&connection, String::new(), persist, cx) {
+            Ok(next) => {
+                self.backend.disconnect();
+                self.generation = self.generation.wrapping_add(1);
+                self.backend = next.backend;
+                self._mailbox = next.mailbox;
+                self.event_task = spawn_events(cx, &self._mailbox, next.wake_rx, self.generation);
+                self.state = State::Connecting;
+                self.status = Some("Reconnecting…".into());
+                self.facts = Facts::NONE;
+                self.prompt = None;
+                self.focus_password = false;
+                self.last_frame = None;
+                self.buffer.clear();
+                self.buttons = 0;
+                self.synthetic_modifiers.clear();
+                cx.notify();
+            }
+            Err(e) => {
+                self.state = State::Closed {
+                    detail: format!("Could not reconnect: {e}"),
+                };
+                self.status = None;
+                cx.notify();
+            }
+        }
     }
 
     fn answer_credentials(&mut self, cx: &mut Context<Self>) {
@@ -915,26 +1026,53 @@ impl SessionWindow {
             }))
             .child(
                 div()
-                    .id("closed-close")
                     .mt(px(8.))
                     .flex()
                     .items_center()
-                    .h(px(32.))
-                    .px(px(16.))
-                    .rounded_lg()
-                    .bg(theme::surface())
-                    .border_1()
-                    .border_color(theme::border())
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme::surface_hover()))
-                    .text_size(px(12.))
-                    .text_color(theme::text_secondary())
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.backend.disconnect();
-                        window.remove_window();
-                        cx.notify();
-                    }))
-                    .child("Close"),
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .id("closed-reconnect")
+                            .flex()
+                            .items_center()
+                            .h(px(32.))
+                            .px(px(16.))
+                            .rounded_lg()
+                            .bg(theme::accent())
+                            .hover(|s| s.bg(theme::accent_hover()))
+                            .cursor_pointer()
+                            .text_size(px(12.))
+                            .font_weight(theme::WEIGHT_SEMIBOLD)
+                            .text_color(theme::accent_text())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.reconnect_pending = false;
+                                this.auto_reconnect_attempted = false;
+                                this.reconnect(cx);
+                            }))
+                            .child("Reconnect"),
+                    )
+                    .child(
+                        div()
+                            .id("closed-close")
+                            .flex()
+                            .items_center()
+                            .h(px(32.))
+                            .px(px(16.))
+                            .rounded_lg()
+                            .bg(theme::surface())
+                            .border_1()
+                            .border_color(theme::border())
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme::surface_hover()))
+                            .text_size(px(12.))
+                            .text_color(theme::text_secondary())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.backend.disconnect();
+                                window.remove_window();
+                                cx.notify();
+                            }))
+                            .child("Close"),
+                    ),
             )
             .into_any_element()
     }
@@ -1142,8 +1280,10 @@ fn toolbar_button(
                 cx.notify();
             }
             4 => {
+                // A user-initiated disconnect should leave the session, not
+                // park on a "Disconnected" card that only offers Close.
                 this.backend.disconnect();
-                cx.notify();
+                window.remove_window();
             }
             _ => {}
         }))
