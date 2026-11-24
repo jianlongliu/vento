@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - 'ventox-v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (for example ventox-v2026.11.21.5)'
+        required: true
 
 permissions:
   contents: write
@@ -31,10 +36,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Check tag
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
           pkgver="$(sed -n 's/^pkgver=//p' packaging/arch/PKGBUILD)"
-          test "$GITHUB_REF_NAME" = "ventox-v$pkgver"
+          test "$TAG" = "ventox-v$pkgver"
 
       - name: Build package
         run: |
@@ -69,14 +76,15 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
           prerelease=""
-          if echo "$GITHUB_REF_NAME" | grep -qiE 'rc|beta|alpha|pre'; then
+          if echo "$TAG" | grep -qiE 'rc|beta|alpha|pre'; then
             prerelease="--prerelease"
           fi
-          gh release create "$GITHUB_REF_NAME" artifacts/* \
+          gh release create "$TAG" artifacts/* \
             --repo "$GITHUB_REPOSITORY" \
-            --title "Ventox ${GITHUB_REF_NAME#ventox-v}" \
+            --title "Ventox ${TAG#ventox-v}" \
             --generate-notes \
             $prerelease
