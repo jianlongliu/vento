@@ -225,12 +225,14 @@ pub struct SessionWindow {
     save_password: bool,
     persist: bool,
     pending_password: Option<String>,
+    connected_at: Option<Instant>,
     ever_connected: bool,
     reconnect_pending: bool,
     auto_reconnect_attempted: bool,
     generation: u64,
     event_task: Task<()>,
     focus_handle: FocusHandle,
+    refocus: bool,
     buttons: i32,
     pointer: (i32, i32),
     synthetic_modifiers: HashMap<i64, Vec<(i64, u32)>>,
@@ -305,12 +307,14 @@ impl SessionWindow {
             save_password,
             persist,
             pending_password,
+            connected_at: None,
             ever_connected: false,
             reconnect_pending: false,
             auto_reconnect_attempted: false,
             generation,
             event_task,
             focus_handle,
+            refocus: false,
             buttons: 0,
             pointer: (0, 0),
             synthetic_modifiers: HashMap::new(),
@@ -327,7 +331,9 @@ impl SessionWindow {
                     self.status = None;
                     self.ever_connected = true;
                     self.reconnect_pending = false;
-                    self.auto_reconnect_attempted = false;
+                    if self.connected_at.is_none() {
+                        self.connected_at = Some(Instant::now());
+                    }
                     if let Some(password) = self.pending_password.take() {
                         cx.global::<Passwords>()
                             .set(&self.connection.address(), &password);
@@ -347,6 +353,8 @@ impl SessionWindow {
                     self.state = State::Closed { detail };
                     self.status = None;
                     self.prompt = None;
+                    self.info_open = false;
+                    self.refocus = true;
                     if was_connected {
                         self.schedule_reconnect(cx);
                     }
@@ -360,7 +368,10 @@ impl SessionWindow {
                     self.prompt = Some(Prompt::Credentials);
                     self.focus_password = true;
                 }
-                Event::PromptWithdrawn => self.prompt = None,
+                Event::PromptWithdrawn => {
+                    self.prompt = None;
+                    self.refocus = true;
+                }
                 Event::TrustNeeded { fingerprint } => {
                     self.prompt = Some(Prompt::Trust {
                         title: "Unrecognised server".into(),
@@ -488,6 +499,7 @@ impl SessionWindow {
         // Reconnect/Close card instead of scheduling itself again from the
         // new backend's Closed event.
         self.ever_connected = false;
+        self.connected_at = None;
         match start_backend(&connection, String::new(), persist, cx) {
             Ok(next) => {
                 self.backend.disconnect();
@@ -512,6 +524,7 @@ impl SessionWindow {
                     detail: format!("Could not reconnect: {e}"),
                 };
                 self.status = None;
+                self.info_open = false;
                 cx.notify();
             }
         }
@@ -542,6 +555,7 @@ impl SessionWindow {
             Some(_) => self.backend.answer_trust(false),
             None => {}
         }
+        self.refocus = true;
         cx.notify();
     }
 
@@ -557,6 +571,7 @@ impl SessionWindow {
             Some(Prompt::Message { .. }) => self.backend.answer_trust(true),
             None => {}
         }
+        self.refocus = true;
         cx.notify();
     }
 
@@ -579,11 +594,11 @@ impl SessionWindow {
         position: gpui::Point<gpui::Pixels>,
     ) -> Option<(i32, i32)> {
         let layout = self.image_layout(window)?;
-        let desktop_w = self.facts.width as f32;
-        let desktop_h = self.facts.height as f32;
-        let x = ((f32::from(position.x) - layout.x) / layout.scale).clamp(0.0, desktop_w - 1.0);
-        let y = ((f32::from(position.y) - layout.y) / layout.scale).clamp(0.0, desktop_h - 1.0);
-        Some((x as i32, y as i32))
+        remote_point_in_layout(
+            &layout,
+            (self.facts.width as f32, self.facts.height as f32),
+            position,
+        )
     }
 
     fn send_pointer(&mut self, window: &Window, position: gpui::Point<gpui::Pixels>, mask: i32) {
@@ -594,32 +609,65 @@ impl SessionWindow {
     }
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, window: &mut Window) {
+        if self.prompt.is_some() {
+            return;
+        }
         self.send_pointer(window, event.position, self.buttons);
     }
 
     fn on_mouse_down(&mut self, button: MouseButton, event: &MouseDownEvent, window: &mut Window) {
+        if self.prompt.is_some() {
+            return;
+        }
+        // A press in the black bars must not turn into a click at the nearest
+        // remote edge, nor be remembered for a drag that later enters the
+        // picture.
+        let Some((x, y)) = self.remote_point(window, event.position) else {
+            return;
+        };
+        self.pointer = (x, y);
         self.buttons |= mouse_mask(button);
-        self.send_pointer(window, event.position, self.buttons);
+        self.backend.pointer(x, y, self.buttons);
     }
 
     fn on_mouse_up(&mut self, button: MouseButton, event: &MouseUpEvent, window: &mut Window) {
-        self.buttons &= !mouse_mask(button);
-        self.send_pointer(window, event.position, self.buttons);
+        let mask = mouse_mask(button);
+        if self.buttons & mask == 0 {
+            return;
+        }
+        self.buttons &= !mask;
+        // A release in the black bars has no remote coordinate of its own,
+        // but it must still lift the button where it was last pressed.
+        if let Some((x, y)) = self.remote_point(window, event.position) {
+            self.pointer = (x, y);
+        }
+        self.send_pointer_at_last();
+    }
+
+    fn on_mouse_up_out(&mut self, button: MouseButton) {
+        let mask = mouse_mask(button);
+        if self.buttons & mask == 0 {
+            return;
+        }
+        self.buttons &= !mask;
+        self.send_pointer_at_last();
+    }
+
+    fn send_pointer_at_last(&mut self) {
+        let (x, y) = self.pointer;
+        self.backend.pointer(x, y, self.buttons);
     }
 
     fn on_scroll(&mut self, event: &ScrollWheelEvent, window: &mut Window) {
-        let delta = match event.delta {
-            ScrollDelta::Lines(delta) => delta.y,
-            ScrollDelta::Pixels(delta) => f32::from(delta.y) / 40.0,
-        };
-        if delta == 0.0 {
+        let (dx, dy) = scroll_notches(event.delta);
+        let mask = wheel_mask(dx, dy);
+        if mask == 0 {
             return;
         }
-        let wheel_mask = if delta > 0.0 { 16 } else { 8 };
-        let steps = delta.abs().ceil().clamp(1.0, 5.0) as usize;
+        let steps = dx.abs().max(dy.abs()).ceil().clamp(1.0, 5.0) as usize;
         if let Some((x, y)) = self.remote_point(window, event.position) {
             for _ in 0..steps {
-                self.backend.pointer(x, y, self.buttons | wheel_mask);
+                self.backend.pointer(x, y, self.buttons | mask);
                 self.backend.pointer(x, y, self.buttons);
             }
         }
@@ -627,19 +675,18 @@ impl SessionWindow {
 
     fn on_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         // While a prompt is open, Enter answers it and Escape cancels it.
-        // These must not be forwarded to the far end.
+        // Every other key belongs to the prompt, not the far end.
         if self.prompt.is_some() {
             match event.keystroke.key.as_str() {
                 "enter" | "return" => {
                     self.accept_prompt(cx);
-                    return;
                 }
                 "escape" => {
                     self.cancel_prompt(cx);
-                    return;
                 }
                 _ => {}
             }
+            return;
         }
         // Ctrl+V offers the local clipboard before the key goes to the far
         // end, so a paste there sees the latest local text.
@@ -686,10 +733,20 @@ impl SessionWindow {
     }
 
     fn status_text(&self) -> &'static str {
-        match self.state {
-            State::Connecting => "Connecting",
+        match &self.state {
+            State::Connecting => {
+                if self
+                    .status
+                    .as_deref()
+                    .is_some_and(|status| status.contains("Reconnecting"))
+                {
+                    "Reconnecting"
+                } else {
+                    "Connecting"
+                }
+            }
             State::Connected => "Connected",
-            State::Closed { .. } => "Disconnected",
+            State::Closed { detail } => closed_label(detail),
         }
     }
 
@@ -715,6 +772,12 @@ impl Render for SessionWindow {
         if self.focus_password && matches!(self.prompt, Some(Prompt::Credentials)) {
             self.focus_password = false;
             window.focus(&self.password.read(cx).handle());
+        }
+        // Prompt handlers have no window of their own; hand the keyboard back
+        // to the session once the sheet is gone.
+        if self.refocus && self.prompt.is_none() {
+            self.refocus = false;
+            window.focus(&self.focus_handle);
         }
         div()
             .flex()
@@ -773,6 +836,18 @@ impl Render for SessionWindow {
                             this.on_mouse_up(MouseButton::Right, event, window)
                         }),
                     )
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, _cx| this.on_mouse_up_out(MouseButton::Left)),
+                    )
+                    .on_mouse_up_out(
+                        MouseButton::Middle,
+                        cx.listener(|this, _, _, _cx| this.on_mouse_up_out(MouseButton::Middle)),
+                    )
+                    .on_mouse_up_out(
+                        MouseButton::Right,
+                        cx.listener(|this, _, _, _cx| this.on_mouse_up_out(MouseButton::Right)),
+                    )
                     .on_scroll_wheel(
                         cx.listener(|this, event, window, _cx| this.on_scroll(event, window)),
                     )
@@ -799,7 +874,7 @@ impl Render for SessionWindow {
                         ),
                         State::Closed { detail } => self.closed_card(detail, cx),
                     })
-                    .child(self.toolbar(cx))
+                    .child(self.toolbar(window, cx))
                     .children(self.info_open.then(|| self.info_panel(cx)))
                     .children(self.prompt.as_ref().map(|_| self.prompt_overlay(cx))),
             )
@@ -808,6 +883,8 @@ impl Render for SessionWindow {
 
 impl SessionWindow {
     fn titlebar(&self) -> impl IntoElement {
+        let address = self.connection.address();
+        let show_address = address != self.connection.name;
         div()
             .flex()
             .items_center()
@@ -841,13 +918,14 @@ impl SessionWindow {
                             .font_weight(theme::WEIGHT_MEDIUM)
                             .child(self.connection.name.clone()),
                     )
-                    .child(
+                    .children(show_address.then(|| {
                         div()
                             .truncate()
                             .text_size(px(11.))
                             .text_color(theme::text_tertiary())
-                            .child(self.connection.address()),
-                    )
+                            .child(address)
+                            .into_any_element()
+                    }))
                     .child(
                         div()
                             .flex_shrink_0()
@@ -868,10 +946,11 @@ impl SessionWindow {
             )
     }
 
-    fn toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn toolbar(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         if matches!(self.state, State::Closed { .. }) {
             return div().into_any_element();
         }
+        let fullscreen = window.is_fullscreen();
         div()
             .absolute()
             .top(px(12.))
@@ -902,7 +981,16 @@ impl SessionWindow {
                         cx,
                     ))
                     .child(divider())
-                    .child(toolbar_button("Fullscreen", 2, false, cx))
+                    .child(toolbar_button(
+                        if fullscreen {
+                            "Exit fullscreen"
+                        } else {
+                            "Fullscreen"
+                        },
+                        2,
+                        fullscreen,
+                        cx,
+                    ))
                     .child(divider())
                     .child(toolbar_button("Info", 3, self.info_open, cx))
                     .child(toolbar_button("Disconnect", 4, false, cx)),
@@ -941,7 +1029,7 @@ impl SessionWindow {
             .id("session-info")
             .occlude()
             .absolute()
-            .top(px(12.))
+            .top(px(62.))
             .right(px(12.))
             .bottom(px(12.))
             .w(px(292.))
@@ -964,6 +1052,7 @@ impl SessionWindow {
                         div()
                             .text_size(px(13.))
                             .font_weight(theme::WEIGHT_SEMIBOLD)
+                            .text_color(theme::SESSION_TEXT)
                             .child("Session"),
                     )
                     .child(
@@ -975,9 +1064,9 @@ impl SessionWindow {
                             .size(px(22.))
                             .rounded_md()
                             .cursor_pointer()
-                            .hover(|s| s.bg(theme::surface_hover()))
+                            .hover(|s| s.bg(rgba(0xffffff14)))
                             .text_size(px(12.))
-                            .text_color(theme::text_secondary())
+                            .text_color(theme::SESSION_TEXT_SECONDARY)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.info_open = false;
                                 cx.notify();
@@ -1003,14 +1092,14 @@ impl SessionWindow {
                                 div()
                                     .flex_shrink_0()
                                     .text_size(px(11.))
-                                    .text_color(theme::text_tertiary())
+                                    .text_color(theme::SESSION_TEXT_TERTIARY)
                                     .child(label),
                             )
                             .child(
                                 div()
                                     .truncate()
                                     .text_size(px(11.))
-                                    .text_color(theme::text_secondary())
+                                    .text_color(theme::SESSION_TEXT_SECONDARY)
                                     .child(value),
                             )
                     })),
@@ -1030,18 +1119,15 @@ impl SessionWindow {
                 div()
                     .text_size(px(17.))
                     .font_weight(theme::WEIGHT_SEMIBOLD)
-                    .child(if detail.is_empty() {
-                        "Disconnected"
-                    } else {
-                        "Connection failed"
-                    }),
+                    .text_color(theme::SESSION_TEXT)
+                    .child(closed_label(detail)),
             )
             .children((!detail.is_empty()).then(|| {
                 div()
                     .max_w(px(520.))
                     .px(px(16.))
                     .text_size(px(12.))
-                    .text_color(theme::text_secondary())
+                    .text_color(theme::SESSION_TEXT_SECONDARY)
                     .child(detail.to_string())
                     .into_any_element()
             }))
@@ -1117,6 +1203,7 @@ impl SessionWindow {
         div()
             .absolute()
             .inset_0()
+            .occlude()
             .flex()
             .items_center()
             .justify_center()
@@ -1267,13 +1354,11 @@ fn toolbar_button(
         .text_size(px(11.))
         .font_weight(theme::WEIGHT_MEDIUM)
         .text_color(if active {
-            theme::accent()
-        } else if danger {
-            theme::text_secondary()
+            theme::SESSION_ACCENT
         } else {
-            theme::text_secondary()
+            theme::SESSION_TEXT_SECONDARY
         })
-        .when(active, |s| s.bg(theme::fade(theme::accent(), 0.14)))
+        .when(active, |s| s.bg(theme::fade(theme::SESSION_ACCENT, 0.16)))
         .hover(move |s| {
             if danger {
                 s.bg(theme::fade(theme::red(), 0.18))
@@ -1295,7 +1380,10 @@ fn toolbar_button(
                 this.scale = ScaleMode::Actual;
                 cx.notify();
             }
-            2 => window.toggle_fullscreen(),
+            2 => {
+                window.toggle_fullscreen();
+                cx.notify();
+            }
             3 => {
                 this.info_open = !this.info_open;
                 cx.notify();
@@ -1328,7 +1416,7 @@ fn centered_note(text: &str) -> AnyElement {
         .items_center()
         .justify_center()
         .text_size(px(12.5))
-        .text_color(theme::text_secondary())
+        .text_color(theme::SESSION_TEXT_SECONDARY)
         .child(text.to_string())
         .into_any_element()
 }
@@ -1363,6 +1451,94 @@ fn layout_for(
         width: desktop_w * scale,
         height: desktop_h * scale,
     })
+}
+
+/// RFB's wheel button bits, which every backend takes.
+const WHEEL_UP: i32 = 8;
+const WHEEL_DOWN: i32 = 16;
+const WHEEL_LEFT: i32 = 32;
+const WHEEL_RIGHT: i32 = 64;
+
+/// GPUI's pixel scroll deltas are measured in these many points per notch.
+const PIXELS_PER_NOTCH: f32 = 40.0;
+
+/// Positive deltas mean the content moves down or right: the wheel rolled up
+/// or left. This is the same sign convention the GTK client uses.
+fn wheel_mask(dx: f32, dy: f32) -> i32 {
+    let mut mask = 0;
+    if dy > 0.0 {
+        mask |= WHEEL_UP;
+    } else if dy < 0.0 {
+        mask |= WHEEL_DOWN;
+    }
+    if dx > 0.0 {
+        mask |= WHEEL_LEFT;
+    } else if dx < 0.0 {
+        mask |= WHEEL_RIGHT;
+    }
+    mask
+}
+
+fn scroll_notches(delta: ScrollDelta) -> (f32, f32) {
+    match delta {
+        ScrollDelta::Lines(delta) => (delta.x, delta.y),
+        ScrollDelta::Pixels(delta) => (
+            f32::from(delta.x) / PIXELS_PER_NOTCH,
+            f32::from(delta.y) / PIXELS_PER_NOTCH,
+        ),
+    }
+}
+
+/// Map a window point to the remote desktop, but only while it is over the
+/// picture. The bars around it belong to the local chrome, not the far end.
+fn remote_point_in_layout(
+    layout: &ImageLayout,
+    desktop: (f32, f32),
+    position: gpui::Point<gpui::Pixels>,
+) -> Option<(i32, i32)> {
+    let x = f32::from(position.x);
+    let y = f32::from(position.y);
+    if layout.scale <= 0.0
+        || desktop.0 <= 0.0
+        || desktop.1 <= 0.0
+        || x < layout.x
+        || x >= layout.x + layout.width
+        || y < layout.y
+        || y >= layout.y + layout.height
+    {
+        return None;
+    }
+    Some((
+        ((x - layout.x) / layout.scale).clamp(0.0, desktop.0 - 1.0) as i32,
+        ((y - layout.y) / layout.scale).clamp(0.0, desktop.1 - 1.0) as i32,
+    ))
+}
+
+/// Authentication failures arrive as backend-specific English text. Match the
+/// known families instead of only TigerVNC's wording, so a rejected saved
+/// password is never silently reused by RDP or the Rust VNC client.
+fn looks_like_auth_failure(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    [
+        "authentication failed",
+        "authentication error",
+        "auth failed",
+        "logon failed",
+        "login failed",
+        "invalid password",
+        "password was not accepted",
+        "password not accepted",
+    ]
+    .iter()
+    .any(|needle| detail.contains(needle))
+}
+
+fn closed_label(detail: &str) -> &'static str {
+    if detail.is_empty() {
+        "Disconnected"
+    } else {
+        "Connection failed"
+    }
 }
 
 #[cfg(test)]
@@ -1415,6 +1591,73 @@ mod tests {
     #[test]
     fn a_zero_sized_desktop_has_no_layout() {
         assert!(layout_for(ScaleMode::Fit, (0., 0.), (1580., 932.), 2.).is_none());
+    }
+
+    #[test]
+    fn the_wheel_uses_rfb_button_bits_in_the_pointer_convention() {
+        assert_eq!(wheel_mask(0., 1.), WHEEL_UP);
+        assert_eq!(wheel_mask(0., -1.), WHEEL_DOWN);
+        assert_eq!(wheel_mask(1., 0.), WHEEL_LEFT);
+        assert_eq!(wheel_mask(-1., 0.), WHEEL_RIGHT);
+        assert_eq!(wheel_mask(1., -1.), WHEEL_DOWN | WHEEL_LEFT);
+        assert_eq!(wheel_mask(0., 0.), 0);
+    }
+
+    #[test]
+    fn pixel_scroll_is_measured_in_forty_point_notches() {
+        let (dx, dy) = scroll_notches(ScrollDelta::Pixels(gpui::point(px(80.), px(-40.))));
+        assert!(close(dx, 2.));
+        assert!(close(dy, -1.));
+    }
+
+    #[test]
+    fn pointer_outside_the_picture_is_not_moved_to_its_edge() {
+        let layout = ImageLayout {
+            scale: 0.5,
+            x: 100.,
+            y: 200.,
+            width: 400.,
+            height: 300.,
+        };
+        let desktop = (800., 600.);
+        assert_eq!(
+            remote_point_in_layout(&layout, desktop, gpui::point(px(100.), px(200.))),
+            Some((0, 0))
+        );
+        assert_eq!(
+            remote_point_in_layout(&layout, desktop, gpui::point(px(499.), px(499.))),
+            Some((798, 598))
+        );
+        assert_eq!(
+            remote_point_in_layout(&layout, desktop, gpui::point(px(0.), px(0.))),
+            None
+        );
+        assert_eq!(
+            remote_point_in_layout(&layout, desktop, gpui::point(px(500.), px(300.))),
+            None
+        );
+        assert_eq!(
+            remote_point_in_layout(&layout, desktop, gpui::point(px(300.), px(500.))),
+            None
+        );
+    }
+
+    #[test]
+    fn the_closed_label_matches_the_detail() {
+        assert_eq!(closed_label(""), "Disconnected");
+        assert_eq!(closed_label("authentication failed"), "Connection failed");
+    }
+
+    #[test]
+    fn auth_failures_are_recognised_across_backends() {
+        assert!(looks_like_auth_failure(
+            "Authentication failed: bad password"
+        ));
+        assert!(looks_like_auth_failure("Logon failed."));
+        assert!(looks_like_auth_failure("The password was not accepted."));
+        assert!(looks_like_auth_failure("Invalid password"));
+        assert!(!looks_like_auth_failure("Connection refused"));
+        assert!(!looks_like_auth_failure("Authentication cancelled"));
     }
 }
 
